@@ -65,15 +65,19 @@ describe("Claude → Kiro (direct route)", () => {
     );
   });
 
-  it("maps output_config.effort high to Kiro max_thinking_length 24576", () => {
+  it("maps output_config.effort high to Kiro output_config.effort high (no max_thinking_length)", () => {
     const out = C2K({
       output_config: { effort: "high" },
       messages: [{ role: "user", content: "think with adaptive effort" }],
     });
 
     expect(out.conversationState.currentMessage.userInputMessage.content).toContain(
-      "<max_thinking_length>24576</max_thinking_length>"
+      "<thinking_mode>enabled</thinking_mode>"
     );
+    expect(out.conversationState.currentMessage.userInputMessage.content).not.toContain(
+      "<max_thinking_length>"
+    );
+    expect(out.additionalModelRequestFields?.output_config?.effort).toBe("high");
   });
 });
 

@@ -28,6 +28,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   resolveKiroModel,
   resolveKiroThinkingBudget,
+  resolveKiroEffort,
   buildThinkingSystemPrefix,
   KIRO_AGENTIC_SYSTEM_PROMPT,
   resolveDefaultProfileArn,
@@ -376,6 +377,7 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
 
   const { upstream: upstreamModel, agentic } = resolveKiroModel(model);
   const thinkingBudget = resolveKiroThinkingBudget(body, credentials?.rawHeaders, model);
+  const effort = resolveKiroEffort(body, credentials?.rawHeaders, model);
 
   // Guard 1: no client tools → flatten all tool interactions to text.
   if (!clientProvidedTools) {
@@ -415,7 +417,7 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
   // Prefix order: thinking_mode tag, timestamp marker, then agentic prompt.
   const timestamp = new Date().toISOString();
   const prefixParts = [];
-  if (thinkingBudget !== null) prefixParts.push(buildThinkingSystemPrefix(thinkingBudget));
+  if (thinkingBudget !== null) prefixParts.push(buildThinkingSystemPrefix());
   prefixParts.push(`[Context: Current time is ${timestamp}]`);
   if (agentic) prefixParts.push(KIRO_AGENTIC_SYSTEM_PROMPT);
   finalContent = `${prefixParts.join("\n\n")}\n\n${finalContent}`;
@@ -449,6 +451,17 @@ export function claudeToKiroRequest(model, body, stream, credentials) {
     if (maxTokens) payload.inferenceConfig.maxTokens = maxTokens;
     if (temperature !== undefined) payload.inferenceConfig.temperature = temperature;
     if (topP !== undefined) payload.inferenceConfig.topP = topP;
+  }
+
+  // Reasoning DEPTH control. Kiro's real depth knob is
+  // additionalModelRequestFields.output_config.effort (low|high|max) — the
+  // <thinking_mode> tag only switches reasoning on. Only set it when thinking
+  // is enabled (effort !== null).
+  if (effort !== null) {
+    payload.additionalModelRequestFields = {
+      ...(payload.additionalModelRequestFields || {}),
+      output_config: { effort },
+    };
   }
 
   // Non-enumerable hint so the executor can route the upstream model id.

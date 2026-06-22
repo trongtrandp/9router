@@ -3,6 +3,7 @@ import { PROVIDERS } from "../config/providers.js";
 import { v4 as uuidv4 } from "uuid";
 import { refreshKiroToken } from "../services/tokenRefresh.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
+import { createInlineThinkingState, splitInlineThinking, flushInlineThinking } from "./kiroInlineThinking.js";
 
 /**
  * KiroExecutor - Executor for Kiro AI (AWS CodeWhisperer)
@@ -108,7 +109,49 @@ export class KiroExecutor extends BaseExecutor {
       hasReasoningContent: false,
       reasoningChunkCount: 0,
       toolCallIndex: 0,
-      seenToolIds: new Map()
+      seenToolIds: new Map(),
+      inlineThinking: createInlineThinkingState()
+    };
+
+    // role:"assistant" goes on the very first emitted delta (chunkIndex 0).
+    const buildDelta = (extra) => (chunkIndex === 0 ? { role: "assistant", ...extra } : extra);
+    const emitChunk = (controller, delta) => {
+      const chunk = {
+        id: responseId,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta, finish_reason: null }]
+      };
+      chunkIndex++;
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    };
+    // assistantResponseEvent content for older models (e.g. 4.6) may carry a
+    // leading <thinking>...</thinking> block inline. Peel it into reasoning,
+    // pass the remainder through as answer content. 4.8/4.7 send clean answer
+    // text here (reasoning arrives via reasoningContentEvent) → splitter no-ops.
+    const emitAssistantContent = (controller, text) => {
+      const { reasoning, content } = splitInlineThinking(state.inlineThinking, text);
+      if (reasoning) {
+        state.hasReasoningContent = true;
+        state.totalContentLength = (state.totalContentLength || 0) + reasoning.length;
+        emitChunk(controller, buildDelta({ reasoning_content: reasoning }));
+        state.reasoningChunkCount++;
+      }
+      if (content) {
+        state.totalContentLength = (state.totalContentLength || 0) + content.length;
+        emitChunk(controller, buildDelta({ content }));
+      }
+    };
+    // Drain any buffered inline-thinking remainder before a finish chunk.
+    const drainInlineThinking = (controller) => {
+      const { reasoning, content } = flushInlineThinking(state.inlineThinking);
+      if (reasoning) {
+        state.hasReasoningContent = true;
+        emitChunk(controller, buildDelta({ reasoning_content: reasoning }));
+        state.reasoningChunkCount++;
+      }
+      if (content) emitChunk(controller, buildDelta({ content }));
     };
 
     const transformStream = new TransformStream({
@@ -145,24 +188,7 @@ export class KiroExecutor extends BaseExecutor {
 
           // Handle assistantResponseEvent
           if (eventType === "assistantResponseEvent" && event.payload?.content) {
-            const content = event.payload.content;
-            state.totalContentLength += content.length;
-
-            const chunk = {
-              id: responseId,
-              object: "chat.completion.chunk",
-              created,
-              model,
-              choices: [{
-                index: 0,
-                delta: chunkIndex === 0
-                  ? { role: "assistant", content }
-                  : { content },
-                finish_reason: null
-              }]
-            };
-            chunkIndex++;
-            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            emitAssistantContent(controller, event.payload.content);
           }
 
           // Handle reasoningContentEvent (Kiro thinking / reasoning)
@@ -349,6 +375,9 @@ export class KiroExecutor extends BaseExecutor {
           if (state.hasMeteringEvent && state.hasContextUsage && !state.finishEmitted) {
             state.finishEmitted = true;
 
+            // Flush any buffered inline-thinking remainder before finishing.
+            drainInlineThinking(controller);
+
             // Estimate tokens if not available from events
             if (!state.usage) {
               // Estimate output tokens from content length
@@ -402,6 +431,9 @@ export class KiroExecutor extends BaseExecutor {
       },
 
       flush(controller) {
+        // Drain any buffered inline-thinking remainder before finishing.
+        drainInlineThinking(controller);
+
         // Emit finish chunk if not already sent
         if (!state.finishEmitted) {
           state.finishEmitted = true;

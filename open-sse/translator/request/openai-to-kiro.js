@@ -9,6 +9,7 @@ import { resolveSessionId } from "../../utils/sessionManager.js";
 import {
   resolveKiroModel,
   resolveKiroThinkingBudget,
+  resolveKiroEffort,
   buildThinkingSystemPrefix,
   KIRO_AGENTIC_SYSTEM_PROMPT,
   resolveDefaultProfileArn
@@ -521,6 +522,7 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
 
   const { upstream: upstreamModel, agentic } = resolveKiroModel(model);
   const thinkingBudget = resolveKiroThinkingBudget(body, credentials?.rawHeaders, model);
+  const effort = resolveKiroEffort(body, credentials?.rawHeaders, model);
 
   const { history, currentMessage } = convertMessages(messages, tools, upstreamModel);
 
@@ -544,7 +546,7 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   // then context/timestamp marker, then optional agentic chunked-write prompt.
   const prefixParts = [];
   if (thinkingBudget !== null) {
-    prefixParts.push(buildThinkingSystemPrefix(thinkingBudget));
+    prefixParts.push(buildThinkingSystemPrefix());
   }
   prefixParts.push(`[Context: Current time is ${timestamp}]`);
   if (agentic) {
@@ -582,6 +584,17 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     if (maxTokens) payload.inferenceConfig.maxTokens = maxTokens;
     if (temperature !== undefined) payload.inferenceConfig.temperature = temperature;
     if (topP !== undefined) payload.inferenceConfig.topP = topP;
+  }
+
+  // Reasoning DEPTH control. Kiro's real depth knob is
+  // additionalModelRequestFields.output_config.effort (low|high|max) — the
+  // <thinking_mode> tag only switches reasoning on. Only set it when thinking
+  // is enabled (effort !== null).
+  if (effort !== null) {
+    payload.additionalModelRequestFields = {
+      ...(payload.additionalModelRequestFields || {}),
+      output_config: { effort }
+    };
   }
 
   // Tag payload so the executor can route the upstream model id correctly.

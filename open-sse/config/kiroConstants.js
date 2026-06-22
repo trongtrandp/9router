@@ -16,7 +16,7 @@
  */
 
 import { extractThinking } from "../translator/concerns/thinkingUnified.js";
-import { effortToBudget } from "../translator/concerns/thinking.js";
+import { effortToBudget, LEVEL_TO_BUDGET } from "../translator/concerns/thinking.js";
 
 export const KIRO_AGENTIC_SUFFIX = "-agentic";
 export const KIRO_THINKING_SUFFIX = "-thinking";
@@ -39,6 +39,13 @@ export function resolveDefaultProfileArn(authMethod) {
 }
 
 export const KIRO_THINKING_BUDGET_DEFAULT = 16000;
+
+// Models whose Kiro upstream rejects `additionalModelRequestFields` outright
+// ("additionalModelRequestFields is not supported for this model", HTTP 400).
+// Mirrors ADAPTIVE_THINKING_UNSUPPORTED in translator/formats/claude.js — these
+// same models also reject Anthropic's output_config.effort. They still honour
+// the <thinking_mode> tag, so reasoning stays ON; only the depth field is skipped.
+export const KIRO_EFFORT_UNSUPPORTED = /haiku/i;
 
 export const KIRO_AGENTIC_SYSTEM_PROMPT = `
 # CRITICAL: CHUNKED WRITE PROTOCOL (MANDATORY)
@@ -129,6 +136,38 @@ export function resolveKiroThinkingBudget(body, headers, model) {
   }
 
   return null;
+}
+
+/**
+ * Resolve the Kiro reasoning effort requested by a client.
+ *
+ * Kiro's real reasoning-depth control is `additionalModelRequestFields.output_config.effort`,
+ * which only accepts `low | high | max`. Maps the unified thinking intent
+ * (Claude output_config.effort / thinking.budget_tokens, OpenAI reasoning_effort,
+ * Gemini, Qwen) onto those three buckets by budget thresholds:
+ *
+ *   budget <= low(1024)     -> "low"
+ *   budget <= high(24576)   -> "high"
+ *   budget >  high          -> "max"
+ *
+ * Returns null when thinking is disabled (none/off) — no effort field injected.
+ * Also returns null for models whose upstream rejects additionalModelRequestFields
+ * (see KIRO_EFFORT_UNSUPPORTED) so we never trip a 400 on e.g. Haiku.
+ * The `<thinking_mode>enabled</thinking_mode>` tag remains the on/off switch;
+ * this effort field tunes depth only.
+ *
+ * @param {object} body OpenAI/Claude-shaped request body
+ * @param {object} [headers] Original inbound HTTP headers (case-insensitive)
+ * @param {string} [model] Model id the caller asked for
+ * @returns {"low"|"high"|"max"|null}
+ */
+export function resolveKiroEffort(body, headers, model) {
+  if (typeof model === "string" && KIRO_EFFORT_UNSUPPORTED.test(model)) return null;
+  const budget = resolveKiroThinkingBudget(body, headers, model);
+  if (budget === null) return null;
+  if (budget <= LEVEL_TO_BUDGET.low) return "low";
+  if (budget <= LEVEL_TO_BUDGET.high) return "high";
+  return "max";
 }
 
 /**
@@ -226,14 +265,16 @@ export function resolveKiroModel(model) {
 }
 
 /**
- * Build the magic system-prompt prefix that turns Kiro reasoning on.
- * Same shape as CLIProxyAPIPlus.
+ * Build the magic system-prompt prefix that turns Kiro reasoning ON.
  *
- * @param {number} [budget=KIRO_THINKING_BUDGET_DEFAULT]
+ * Only `<thinking_mode>enabled</thinking_mode>` matters — it is the on/off
+ * switch the backend honours. The old `<max_thinking_length>` line is dropped:
+ * upstream ignores it entirely (verified — pushing 300..200000 leaves reasoning
+ * length unchanged). Reasoning DEPTH is controlled by
+ * `additionalModelRequestFields.output_config.effort` instead (see resolveKiroEffort).
  */
-export function buildThinkingSystemPrefix(budget = KIRO_THINKING_BUDGET_DEFAULT) {
-  const safeBudget = Math.max(1, Math.min(32000, Number(budget) || KIRO_THINKING_BUDGET_DEFAULT));
-  return `<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>${safeBudget}</max_thinking_length>`;
+export function buildThinkingSystemPrefix() {
+  return `<thinking_mode>enabled</thinking_mode>`;
 }
 
 function pickHeader(headers, name) {
